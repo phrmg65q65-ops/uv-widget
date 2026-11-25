@@ -1,0 +1,731 @@
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: orange; icon-glyph: sun;
+
+/*
+ * UV-Index Riederalp & Schweiz – Scriptable-Widget (v2)
+ *
+ * Daten: icon-uv (github.com/ofuhrer/icon-uv), gerechnet aus MeteoSwiss ICON-CH2
+ * und CAMS. Experimentelles Modell, keine offizielle MeteoSchweiz-Prognose.
+ *
+ * Grössen: klein, mittel, gross, Sperrbildschirm (rund, rechteckig, inline).
+ * Widget-Parameter (optional): Standort-ID, z. B. moosfluh, bern, walliser_alpen_3000
+ * In der App ausgeführt: Tabelle aller Standorte + Vorschau der Widgets.
+ */
+
+const CONFIG = {
+  // Nach dem GitHub-Setup eintragen, z. B.
+  // "https://raw.githubusercontent.com/DEIN-NAME/uv-widget/main/docs"
+  // Leer = Demo mit dem fixen Beispiel-Snapshot (7.–10.9.2026) aus dem icon-uv-Repo.
+  DATA_BASE_URL: "",
+  FEATURED: "riederalp",
+  REGION: ["moosfluh", "walliser_alpen_2000", "walliser_alpen_3000"],
+  SWISS: ["zuerich", "bern", "genf", "lugano"],
+  TOMORROW_FROM_HOUR: 18, // ab dieser Stunde steht der morgige Tag im Vordergrund
+  STALE_HOURS: 30,
+  REFRESH_MINUTES: 60,
+  SNOW_ALBEDO: 0.3,
+  TOKEN_KEY: "uv-widget-github-token", // nur für private Repos (Keychain)
+};
+
+const DEMO_URL =
+  "https://raw.githubusercontent.com/ofuhrer/icon-uv/50452d9b5f9b0890fa11418338c6dd5b79ca03a3/examples/map/index.locations.json";
+const DEMO_FALLBACK = ["brig", "sion", "bern"];
+const TZ = "Europe/Zurich";
+
+const NAMES = {
+  zuerich: "Zürich", genf: "Genf", basel: "Basel", bern: "Bern", lugano: "Lugano",
+  davos: "Davos", brig: "Brig", sion: "Sion", zermatt: "Zermatt",
+  walliser_alpen_1000: "Walliser Alpen", walliser_alpen_2000: "Walliser Alpen",
+  walliser_alpen_3000: "Walliser Alpen",
+};
+
+// Fixes dunkles Design: wirkt in hellem und dunklem Modus gleich
+const T = {
+  bgTop: new Color("#1E2C3C"),
+  bgBottom: new Color("#0C131B"),
+  text: new Color("#FFFFFF"),
+  sub: new Color("#A9B6C4"),
+  faint: new Color("#6F8091"),
+  warn: new Color("#FFB340"),
+  sun: new Color("#FFC233"),
+  snow: new Color("#8AD8FF"),
+  row: new Color("#FFFFFF", 0.07),
+  ghost: new Color("#FFFFFF", 0.14),
+};
+
+const CAT = {
+  low:       { bg: "#43A047", fg: "#FFFFFF", de: "Niedrig",     dot: "🟢" },
+  moderate:  { bg: "#F4C430", fg: "#1A1A1A", de: "Mässig",      dot: "🟡" },
+  high:      { bg: "#F57C00", fg: "#FFFFFF", de: "Hoch",        dot: "🟠" },
+  very_high: { bg: "#E53935", fg: "#FFFFFF", de: "Sehr hoch",   dot: "🔴" },
+  extreme:   { bg: "#8E5CD9", fg: "#FFFFFF", de: "Extrem",      dot: "🟣" },
+  none:      { bg: "#344150", fg: "#A9B6C4", de: "Keine Daten", dot: "⚪️" },
+};
+
+const ADVICE = {
+  low: "Kein Schutz nötig",
+  moderate: "Hut, Brille, Sonnencreme",
+  high: "Schützen, mittags Schatten",
+  very_high: "Extra Schutz, 11–15 Uhr meiden",
+  extreme: "Sonne meiden, voller Schutz",
+  none: "Keine Prognose verfügbar",
+};
+
+// ---------- Zeit & Datum ----------
+
+function parts(date, opts) {
+  const out = {};
+  new Intl.DateTimeFormat("en-GB", Object.assign({ timeZone: TZ }, opts))
+    .formatToParts(date).forEach(p => { out[p.type] = p.value; });
+  return out;
+}
+function localDate(d) {
+  const p = parts(d, { year: "numeric", month: "2-digit", day: "2-digit" });
+  return `${p.year}-${p.month}-${p.day}`;
+}
+function localHour(d) {
+  return Number(parts(d, { hour: "2-digit", hourCycle: "h23" }).hour) % 24;
+}
+function hhmm(d) {
+  const p = parts(d, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return `${p.hour}:${p.minute}`;
+}
+function parseUTC(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(s || "");
+  return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0))) : null;
+}
+function ymd(key) { return key.split("-").map(Number); }
+function addDays(key, n) {
+  const [y, m, d] = ymd(key);
+  return new Date(Date.UTC(y, m - 1, d + n, 12)).toISOString().slice(0, 10);
+}
+function weekday(key) {
+  const [y, m, d] = ymd(key);
+  return new Intl.DateTimeFormat("de-CH", { weekday: "short", timeZone: "UTC" })
+    .format(new Date(Date.UTC(y, m - 1, d, 12))).replace(".", "");
+}
+function dm(key) { const [, m, d] = ymd(key); return `${d}.${m}.`; }
+function stamp(d) { return `${dm(localDate(d))} ${hhmm(d)}`; }
+function roundQuarter(d) { const q = 15 * 60000; return new Date(Math.round(d / q) * q); }
+
+// Spaltenkopf: "Heute", sonst immer Wochentag + Datum ("Fr 30.")
+function colLabel(key, c) {
+  return !c.demo && key === c.today ? "Heute" : `${weekday(key)} ${ymd(key)[2]}.`;
+}
+// Überschrift des Hauptwerts: "Heute, 29.10." / "Morgen, 30.10." / "Mo 7.9."
+function heroDay(key, c) {
+  if (!c.demo && key === c.today) return `Heute, ${dm(key)}`;
+  if (!c.demo && key === addDays(c.today, 1)) return `Morgen, ${dm(key)}`;
+  return `${weekday(key)} ${dm(key)}`;
+}
+
+// ---------- Daten ----------
+
+async function loadJSON(url, cacheName) {
+  const fm = FileManager.local();
+  const path = fm.joinPath(fm.cacheDirectory(), cacheName);
+  try {
+    const req = new Request(url);
+    req.timeoutInterval = 20;
+    if (Keychain.contains(CONFIG.TOKEN_KEY)) {
+      req.headers = { Authorization: `token ${Keychain.get(CONFIG.TOKEN_KEY)}` };
+    }
+    const json = await req.loadJSON();
+    if (!json || typeof json !== "object") throw new Error("ungültige Antwort");
+    fm.writeString(path, JSON.stringify(json));
+    return { json, offline: false };
+  } catch (err) {
+    if (fm.fileExists(path)) return { json: JSON.parse(fm.readString(path)), offline: true };
+    throw err;
+  }
+}
+
+async function loadData() {
+  const demo = !CONFIG.DATA_BASE_URL;
+  const base = CONFIG.DATA_BASE_URL.replace(/\/+$/, "");
+  const daily = await loadJSON(demo ? DEMO_URL : `${base}/daily-uv.json`,
+    demo ? "uv-widget-demo.json" : "uv-widget-daily.json");
+  if (!daily.json || daily.json.schema !== "daily-uv") throw new Error("kein daily-uv-JSON");
+  let hourly = null;
+  if (!demo) {
+    try { hourly = (await loadJSON(`${base}/hourly-uv.json`, "uv-widget-hourly.json")).json; }
+    catch (e) { hourly = null; }
+  }
+  const byId = {};
+  for (const e of daily.json.entries) {
+    const id = e.location.id;
+    if (!byId[id]) byId[id] = { id, location: e.location, days: {} };
+    byId[id].days[e.valid_date] = e;
+  }
+  return { daily: daily.json, hourly, byId, demo, offline: daily.offline };
+}
+
+function catKeyFromValue(v) {
+  if (v == null || !isFinite(v)) return "none";
+  if (v <= 2) return "low";
+  if (v <= 5) return "moderate";
+  if (v <= 7) return "high";
+  if (v <= 10) return "very_high";
+  return "extreme";
+}
+function catKey(e) {
+  if (!e || e.status === "unavailable" || e.display_uvi == null) return "none";
+  return CAT[e.category] ? e.category : catKeyFromValue(e.display_uvi);
+}
+function valueText(e) {
+  return catKey(e) === "none" ? "–" : `${e.display_uvi}${e.status === "degraded" ? "*" : ""}`;
+}
+function name(loc) {
+  const base = NAMES[loc.id] || loc.label || loc.id;
+  return loc.kind === "region_altitude" ? `${base} ${Math.round(loc.altitude_m)} m` : base;
+}
+function peakText(e, short) {
+  if (!e || catKey(e) === "none") return null;
+  const r = e.peak_window_start_range_utc ||
+    (e.peak_window_start_utc ? [e.peak_window_start_utc, e.peak_window_start_utc] : null);
+  if (!r) return null;
+  const a = parseUTC(r[0]), b = parseUTC(r[1]);
+  if (!a || !b) return null;
+  const start = roundQuarter(a), end = roundQuarter(new Date(b.getTime() + 30 * 60000));
+  const txt = end - start <= 45 * 60000
+    ? `≈ ${hhmm(roundQuarter(new Date((a.getTime() + b.getTime()) / 2 + 15 * 60000)))}`
+    : `${hhmm(start)}–${hhmm(end)}`;
+  return short ? txt : `Spitze ${txt}`;
+}
+function snowy(data, id, key) {
+  const p = data.hourly && data.hourly.points && data.hourly.points[id];
+  const a = p && p.uv_albedo_max && p.uv_albedo_max[key];
+  return typeof a === "number" && a >= CONFIG.SNOW_ALBEDO;
+}
+function advice(k, snow) {
+  const main = snow && (k === "low" || k === "none") ? "Sonnenbrille tragen" : ADVICE[k];
+  return snow ? `${main}\n❄︎ Schnee: mehr UV` : main;
+}
+
+function buildContext(data) {
+  const now = new Date();
+  const demo = data.demo;
+  const today = demo ? data.daily.valid_dates[0] : localDate(now);
+  const dayKeys = data.daily.valid_dates.filter(d => d >= today).slice(0, 4);
+  const param = (args.widgetParameter || "").trim().toLowerCase();
+  let id = param || CONFIG.FEATURED;
+  let substitute = false;
+  if (!param && !data.byId[id]) {
+    const alt = DEMO_FALLBACK.find(x => data.byId[x]);
+    if (alt) { id = alt; substitute = true; }
+  }
+  let heroKey = dayKeys[0];
+  if (!demo && heroKey === today && localHour(now) >= CONFIG.TOMORROW_FROM_HOUR && dayKeys[1]) {
+    heroKey = dayKeys[1];
+  }
+  const issued = parseUTC(data.daily.issued_at);
+  const stale = !demo && (!issued || (now - issued) / 3.6e6 > CONFIG.STALE_HOURS);
+  const series = data.hourly && data.hourly.points && data.hourly.points[id] &&
+    data.hourly.points[id].series;
+  return { now, demo, today, dayKeys, id, loc: data.byId[id], heroKey, issued, stale,
+           substitute, offline: data.offline, series: series || null };
+}
+
+function status(c, long) {
+  if (c.demo) {
+    return { text: long ? `Demo-Snapshot vom ${dm(c.dayKeys[0])}${ymd(c.dayKeys[0])[0]} · für Live-Daten DATA_BASE_URL setzen`
+                        : `Demo ${dm(c.dayKeys[0])}`, warn: true };
+  }
+  if (c.stale) {
+    const when = c.issued ? (long ? stamp(c.issued) : dm(localDate(c.issued))) : "?";
+    return { text: long ? `⚠︎ veraltet · Stand ${when} · läuft der Workflow?` : `⚠︎ Stand ${when}`, warn: true };
+  }
+  if (c.offline) return { text: long ? `offline · Stand ${stamp(c.issued)}` : "offline", warn: true };
+  return { text: long ? `Stand ${hhmm(c.issued)} · icon-uv · ICON-CH2 + CAMS · experimentell`
+                      : `Stand ${hhmm(c.issued)}`, warn: false };
+}
+
+// ---------- Zeichnungen ----------
+
+function canvas(w, h) {
+  const ctx = new DrawContext();
+  ctx.size = new Size(w, h);
+  ctx.opaque = false;
+  ctx.respectScreenScale = true;
+  return ctx;
+}
+function fillRounded(ctx, rect, r, color) {
+  const path = new Path();
+  path.addRoundedRect(rect, r, r);
+  ctx.addPath(path);
+  ctx.setFillColor(color);
+  ctx.fillPath();
+}
+
+function gaugeImage(value, w, h) {
+  const ctx = canvas(w, h);
+  const n = 11, gap = 2, sw = (w - gap * (n - 1)) / n;
+  for (let i = 1; i <= n; i++) {
+    const on = value != null && i <= value;
+    fillRounded(ctx, new Rect((i - 1) * (sw + gap), 0, sw, h), h / 2,
+      on ? new Color(CAT[catKeyFromValue(i)].bg) : T.ghost);
+  }
+  return ctx.getImage();
+}
+
+// Stundenbalken: Prognose farbig, wolkenlos als heller Hintergrundbalken
+function hourlyImage(series, key, w, h, now) {
+  const pts = series.filter(p => localDate(parseUTC(p[0])) === key);
+  if (pts.length < 3) return null;
+  const ctx = canvas(w, h);
+  const top = 13, bottom = 12, ch = h - top - bottom;
+  const scale = Math.max(4, Math.ceil(Math.max(...pts.map(p => Math.max(p[1] || 0, p[2] || 0)))));
+  const gap = pts.length > 12 ? 1.5 : 2.5;
+  const bw = (w - gap * (pts.length - 1)) / pts.length;
+  const r = Math.min(2.5, bw / 2);
+
+  ctx.setFont(Font.semiboldSystemFont(8.5));
+  ctx.setTextColor(T.faint);
+  ctx.drawTextInRect("UV PRO STUNDE", new Rect(0, 0, w, 11));
+  ctx.setTextAlignedCenter();
+
+  pts.forEach((p, i) => {
+    const x = i * (bw + gap);
+    const mid = parseUTC(p[0]);
+    const clear = Math.max(0, p[2] || 0), v = Math.max(0, p[1] || 0);
+    const gh = (ch * Math.min(clear, scale)) / scale;
+    if (gh > 0.5) fillRounded(ctx, new Rect(x, top + ch - gh, bw, gh), r, T.ghost);
+    const vh = Math.max(2, (ch * Math.min(v, scale)) / scale);
+    fillRounded(ctx, new Rect(x, top + ch - vh, bw, vh), r,
+      new Color(CAT[catKeyFromValue(Math.floor(v + 0.5))].bg));
+    const hour = localHour(new Date(mid.getTime() - 30 * 60000));
+    if (hour % 3 === 0) {
+      ctx.setFont(Font.mediumSystemFont(8.5));
+      ctx.setTextColor(T.faint);
+      ctx.drawTextInRect(String(hour), new Rect(x - 8, h - bottom + 2, bw + 16, bottom));
+    }
+  });
+  if (now) {
+    const t0 = parseUTC(pts[0][0]).getTime() - 30 * 60000;
+    const t1 = parseUTC(pts[pts.length - 1][0]).getTime() + 30 * 60000;
+    if (now >= t0 && now <= t1) {
+      const x = ((now - t0) / (t1 - t0)) * w;
+      ctx.setFillColor(new Color("#FFFFFF", 0.75));
+      ctx.fillRect(new Rect(x - 0.75, top - 2, 1.5, ch + 2));
+      ctx.fillEllipse(new Rect(x - 2.5, top - 5, 5, 5));
+    }
+  }
+  return ctx.getImage();
+}
+
+// Tagesbalken (wenn keine Stundenwerte da sind, z. B. im Demo)
+function daysImage(loc, keys, c, w, h) {
+  const ctx = canvas(w, h);
+  const top = 14, bottom = 13, ch = h - top - bottom;
+  const vals = keys.map(k => loc.days[k]);
+  const scale = Math.max(8, ...vals.map(e => (e && e.display_uvi) || 0));
+  const colW = w / keys.length, bw = Math.min(22, colW * 0.55);
+  vals.forEach((e, i) => {
+    const k = catKey(e);
+    const cx = colW * i + colW / 2;
+    const v = k === "none" ? 0 : e.display_uvi;
+    const bh = Math.max(3, (ch * v) / scale);
+    fillRounded(ctx, new Rect(cx - bw / 2, top + ch - bh, bw, bh), 4,
+      new Color(CAT[k === "none" ? "none" : k].bg));
+    ctx.setTextAlignedCenter();
+    ctx.setFont(Font.boldRoundedSystemFont(11));
+    ctx.setTextColor(T.text);
+    ctx.drawTextInRect(valueText(e), new Rect(cx - colW / 2, top + ch - bh - 14, colW, 13));
+    ctx.setFont(Font.mediumSystemFont(8.5));
+    ctx.setTextColor(keys[i] === c.heroKey ? T.text : T.faint);
+    ctx.drawTextInRect(colLabel(keys[i], c), new Rect(cx - colW / 2, h - bottom + 2, colW, bottom));
+  });
+  return ctx.getImage();
+}
+
+// ---------- Bausteine ----------
+
+function addText(stack, str, font, color, opts = {}) {
+  const t = stack.addText(str);
+  t.font = font;
+  t.textColor = color || T.text;
+  t.lineLimit = opts.lines || 1;
+  t.minimumScaleFactor = opts.scale || 0.75;
+  return t;
+}
+function centeredText(parent, str, font, color) {
+  const r = parent.addStack();
+  r.layoutHorizontally();
+  r.addSpacer();
+  addText(r, str, font, color, { scale: 0.5 });
+  r.addSpacer();
+  return r;
+}
+function symbol(stack, sf, size, color) {
+  const sym = SFSymbol.named(sf);
+  if (!sym) return;
+  sym.applyFont(Font.semiboldSystemFont(size));
+  const img = stack.addImage(sym.image);
+  img.imageSize = new Size(size + 2, size + 2);
+  img.tintColor = color;
+}
+function pill(stack, e, w, h, size) {
+  const k = catKey(e);
+  const p = stack.addStack();
+  p.size = new Size(w, h);
+  p.cornerRadius = h / 2;
+  p.backgroundColor = new Color(CAT[k].bg);
+  p.centerAlignContent();
+  p.addSpacer();
+  addText(p, valueText(e), Font.boldRoundedSystemFont(size), new Color(CAT[k].fg), { scale: 0.6 });
+  p.addSpacer();
+  return p;
+}
+function badge(stack, e, size) {
+  const k = catKey(e);
+  const b = stack.addStack();
+  b.layoutVertically();
+  b.size = new Size(size, size);
+  b.cornerRadius = Math.round(size * 0.26);
+  b.backgroundColor = new Color(CAT[k].bg);
+  b.addSpacer();
+  centeredText(b, "UV", Font.heavySystemFont(Math.round(size * 0.17)), new Color(CAT[k].fg, 0.75));
+  centeredText(b, valueText(e), Font.heavyRoundedSystemFont(Math.round(size * 0.5)), new Color(CAT[k].fg));
+  b.addSpacer();
+}
+
+function heroBlock(stack, data, c, size, withAdvice) {
+  const e = c.loc.days[c.heroKey];
+  const k = catKey(e);
+  const row = stack.addStack();
+  row.layoutHorizontally();
+  row.centerAlignContent();
+  badge(row, e, size);
+  row.addSpacer(10);
+  const col = row.addStack();
+  col.layoutVertically();
+  addText(col, CAT[k].de, Font.boldSystemFont(size >= 54 ? 17 : 15));
+  const pk = peakText(e);
+  if (pk) { col.addSpacer(1); addText(col, pk, Font.mediumSystemFont(10.5), T.sub); }
+  const ens = e && e.ensemble;
+  if (ens && ens.p10 != null && ens.p90 != null) {
+    addText(col, `Bandbreite ${Math.round(ens.p10)}–${Math.round(ens.p90)}`, Font.systemFont(9.5), T.faint);
+  }
+  if (withAdvice) {
+    col.addSpacer(3);
+    addText(col, advice(k, snowy(data, c.id, c.heroKey)), Font.mediumSystemFont(9.5), T.sub, { lines: 3 });
+  }
+  return k;
+}
+
+function headerLine(stack, data, c) {
+  const row = stack.addStack();
+  row.layoutHorizontally();
+  row.centerAlignContent();
+  symbol(row, "sun.max.fill", 12, T.sun);
+  row.addSpacer(5);
+  addText(row, name(c.loc.location), Font.boldSystemFont(14));
+  if (c.loc.location.kind === "point") {
+    row.addSpacer(5);
+    addText(row, `${Math.round(c.loc.location.altitude_m)} m`, Font.mediumSystemFont(11), T.faint);
+  }
+  if (snowy(data, c.id, c.heroKey)) { row.addSpacer(5); symbol(row, "snowflake", 10, T.snow); }
+  row.addSpacer();
+  addText(row, heroDay(c.heroKey, c), Font.semiboldSystemFont(11), T.sub);
+}
+
+function statusLine(stack, c, long) {
+  const s = status(c, long);
+  addText(stack, s.text, Font.mediumSystemFont(8.5), s.warn ? T.warn : T.faint, { scale: 0.7 });
+}
+
+// Folgetage als kompakte Zeile: "Fr 30. ● Sa 31. ● …"
+function nextDaysInline(stack, c, keys, small) {
+  const row = stack.addStack();
+  row.layoutHorizontally();
+  row.centerAlignContent();
+  keys.forEach((key, i) => {
+    if (i) row.addSpacer(small ? 7 : 10);
+    addText(row, small ? weekday(key) : colLabel(key, c), Font.semiboldSystemFont(small ? 9.5 : 10), T.sub);
+    row.addSpacer(3);
+    pill(row, c.loc.days[key], small ? 22 : 24, 16, 10.5);
+  });
+  return row;
+}
+
+// ---------- Layouts ----------
+
+function smallWidget(w, data, c) {
+  const e = c.loc.days[c.heroKey];
+  const top = w.addStack();
+  top.layoutHorizontally();
+  top.centerAlignContent();
+  addText(top, name(c.loc.location), Font.boldSystemFont(14));
+  top.addSpacer();
+  if (snowy(data, c.id, c.heroKey)) symbol(top, "snowflake", 10, T.snow);
+  else symbol(top, "sun.max.fill", 11, T.sun);
+
+  const sub = w.addStack();
+  sub.layoutHorizontally();
+  const alt = c.loc.location.kind === "point" ? `${Math.round(c.loc.location.altitude_m)} m · ` : "";
+  const st = status(c, false);
+  if (st.warn) addText(sub, `${alt}${st.text}`, Font.semiboldSystemFont(9.5), T.warn);
+  else addText(sub, `${alt}${heroDay(c.heroKey, c).replace(/, .*/, "")}`, Font.mediumSystemFont(9.5), T.sub);
+
+  w.addSpacer();
+  const row = w.addStack();
+  row.layoutHorizontally();
+  row.centerAlignContent();
+  badge(row, e, 52);
+  row.addSpacer(9);
+  const col = row.addStack();
+  col.layoutVertically();
+  addText(col, CAT[catKey(e)].de, Font.boldSystemFont(14));
+  const pk = peakText(e, true);
+  if (pk) addText(col, pk, Font.mediumSystemFont(10.5), T.sub);
+
+  w.addSpacer();
+  const k = catKey(e);
+  w.addImage(gaugeImage(k === "none" ? null : e.display_uvi, 130, 5)).imageSize = new Size(130, 5);
+  w.addSpacer(8);
+  const next = c.dayKeys.filter(d => d > c.heroKey).slice(0, 3);
+  if (next.length) nextDaysInline(w, c, next, true);
+}
+
+function mediumWidget(w, data, c) {
+  headerLine(w, data, c);
+  w.addSpacer(6);
+  w.addSpacer();
+  const body = w.addStack();
+  body.layoutHorizontally();
+  body.centerAlignContent();
+  heroBlock(body, data, c, 54, true);
+  body.addSpacer(10);
+  body.addSpacer();
+  const img = c.series ? hourlyImage(c.series, c.heroKey, 128, 62, c.heroKey === c.today ? c.now : null) : null;
+  if (img) body.addImage(img).imageSize = new Size(128, 62);
+  else body.addImage(daysImage(c.loc, c.dayKeys, c, 128, 62)).imageSize = new Size(128, 62);
+
+  w.addSpacer();
+  const foot = w.addStack();
+  foot.layoutHorizontally();
+  foot.centerAlignContent();
+  if (img) {
+    const next = c.dayKeys.filter(d => d > c.heroKey).slice(0, 3);
+    if (next.length) nextDaysInline(foot, c, next, false);
+  }
+  foot.addSpacer();
+  statusLine(foot, c, false);
+}
+
+const COL_W = 32, COL_GAP = 5;
+
+function tableHead(parent, title, keys, c) {
+  const head = parent.addStack();
+  head.layoutHorizontally();
+  head.centerAlignContent();
+  head.setPadding(0, 7, 0, 7);
+  addText(head, title, Font.boldSystemFont(8.5), T.faint);
+  head.addSpacer();
+  keys.forEach((k, i) => {
+    if (i) head.addSpacer(COL_GAP);
+    const s = head.addStack();
+    s.size = new Size(COL_W, 11);
+    s.addSpacer();
+    addText(s, colLabel(k, c), Font.semiboldSystemFont(8.5), k === c.heroKey ? T.text : T.sub, { scale: 0.6 });
+    s.addSpacer();
+  });
+}
+
+function tableRow(parent, data, c, id, keys, highlight) {
+  const l = data.byId[id];
+  if (!l) return false;
+  const row = parent.addStack();
+  row.layoutHorizontally();
+  row.centerAlignContent();
+  row.setPadding(2, 7, 2, 7);
+  if (highlight) { row.backgroundColor = T.row; row.cornerRadius = 8; }
+  addText(row, name(l.location), highlight ? Font.boldSystemFont(12) : Font.mediumSystemFont(12));
+  if (l.location.kind === "point") {
+    row.addSpacer(4);
+    addText(row, `${Math.round(l.location.altitude_m)} m`, Font.mediumSystemFont(9), T.faint);
+  }
+  if (snowy(data, id, keys[0])) { row.addSpacer(4); symbol(row, "snowflake", 8, T.snow); }
+  row.addSpacer();
+  keys.forEach((k, i) => { if (i) row.addSpacer(COL_GAP); pill(row, l.days[k], COL_W, 16, 10.5); });
+  return true;
+}
+
+function largeWidget(w, data, c) {
+  headerLine(w, data, c);
+  w.addSpacer(10);
+
+  const body = w.addStack();
+  body.layoutHorizontally();
+  body.centerAlignContent();
+  heroBlock(body, data, c, 60, true);
+  body.addSpacer(12);
+  body.addSpacer();
+  const img = c.series ? hourlyImage(c.series, c.heroKey, 130, 64, c.heroKey === c.today ? c.now : null) : null;
+  // Ohne Stundenwerte (Demo): Tagesbalken statt Stundenkurve
+  if (img) body.addImage(img).imageSize = new Size(130, 64);
+  else body.addImage(daysImage(c.loc, c.dayKeys, c, 130, 64)).imageSize = new Size(130, 64);
+
+  w.addSpacer(10);
+  w.addSpacer();
+  const keys = c.dayKeys;
+  // Hauptort steht nur in der Tabelle, wenn oben die Stundenkurve statt der Tage steht
+  const others = CONFIG.REGION.filter(id => id !== c.id && data.byId[id]);
+  const region = img ? [c.id, ...others] : others;
+  tableHead(w, c.substitute ? "REGION" : "ALETSCH · WALLIS", keys, c);
+  w.addSpacer(3);
+  region.forEach((id, i) => { if (i) w.addSpacer(2); tableRow(w, data, c, id, keys, img && i === 0); });
+
+  const swiss = CONFIG.SWISS.filter(id => id !== c.id && data.byId[id]);
+  if (swiss.length) {
+    w.addSpacer(8);
+    w.addSpacer();
+    tableHead(w, "SCHWEIZ", [], c);
+    w.addSpacer(3);
+    swiss.forEach((id, i) => { if (i) w.addSpacer(2); tableRow(w, data, c, id, keys, false); });
+  }
+
+  w.addSpacer();
+  const foot = w.addStack();
+  foot.layoutHorizontally();
+  statusLine(foot, c, true);
+  const shown = [...region, ...swiss].map(id => data.byId[id]);
+  if (shown.some(l => keys.some(k => l.days[k] && l.days[k].status === "degraded"))) {
+    foot.addSpacer();
+    addText(foot, "* eingeschränkt", Font.mediumSystemFont(8.5), T.faint);
+  }
+}
+
+function accessoryWidget(w, data, c, family) {
+  const e = c.loc.days[c.heroKey];
+  const k = catKey(e);
+  const pk = peakText(e, true);
+  if (family === "accessoryInline") {
+    addText(w, `☀︎ UV ${valueText(e)} ${name(c.loc.location)}${pk ? " · " + pk : ""}`, Font.systemFont(12));
+    return;
+  }
+  if (family === "accessoryCircular") {
+    w.addAccessoryWidgetBackground = true;
+    w.addSpacer();
+    centeredText(w, "UV", Font.semiboldSystemFont(10));
+    centeredText(w, valueText(e), Font.heavyRoundedSystemFont(24));
+    w.addSpacer();
+    return;
+  }
+  addText(w, `UV ${valueText(e)} · ${CAT[k].de}`, Font.boldRoundedSystemFont(15));
+  addText(w, `${name(c.loc.location)}${pk ? " · " + pk : ""}`, Font.systemFont(12));
+  const next = c.dayKeys.filter(d => d > c.heroKey).slice(0, 3);
+  addText(w, next.map(d => `${weekday(d)} ${valueText(c.loc.days[d])}`).join(" · "), Font.systemFont(12));
+}
+
+function errorWidget(w, message) {
+  symbol(w, "exclamationmark.triangle.fill", 14, T.warn);
+  w.addSpacer(4);
+  addText(w, "UV-Widget", Font.boldSystemFont(14));
+  w.addSpacer(2);
+  addText(w, message, Font.systemFont(10.5), T.sub, { lines: 6 });
+}
+
+function buildWidget(data, family) {
+  const w = new ListWidget();
+  w.refreshAfterDate = new Date(Date.now() + CONFIG.REFRESH_MINUTES * 60000);
+  const accessory = family.startsWith("accessory");
+  if (!accessory) {
+    const g = new LinearGradient();
+    g.colors = [T.bgTop, T.bgBottom];
+    g.locations = [0, 1];
+    w.backgroundGradient = g;
+    w.setPadding(14, 15, 12, 15);
+  }
+  if (data.error) { errorWidget(w, data.error); return w; }
+  const c = buildContext(data);
+  if (!c.loc) { errorWidget(w, `Standort «${c.id}» ist nicht in den Daten.`); return w; }
+  if (!c.heroKey) { errorWidget(w, "Prognose abgelaufen. Läuft der GitHub-Workflow noch?"); return w; }
+  if (accessory) accessoryWidget(w, data, c, family);
+  else if (family === "small") smallWidget(w, data, c);
+  else if (family === "medium") mediumWidget(w, data, c);
+  else largeWidget(w, data, c);
+  return w;
+}
+
+// ---------- App-Ansicht ----------
+
+async function showTable(data) {
+  const table = new UITable();
+  table.showSeparators = true;
+  if (data.error) {
+    const r = new UITableRow();
+    r.addText("Fehler", data.error);
+    table.addRow(r);
+    await table.present();
+    return;
+  }
+  const c = buildContext(data);
+  const keys = c.dayKeys;
+
+  [["Vorschau klein", "small"], ["Vorschau mittel", "medium"], ["Vorschau gross", "large"]].forEach(([t, f]) => {
+    const r = new UITableRow();
+    r.dismissOnSelect = false;
+    r.addText(`${t} ›`).titleColor = Color.blue();
+    r.onSelect = async () => {
+      const wid = buildWidget(data, f);
+      if (f === "small") await wid.presentSmall();
+      else if (f === "medium") await wid.presentMedium();
+      else await wid.presentLarge();
+    };
+    table.addRow(r);
+  });
+
+  const head = new UITableRow();
+  head.isHeader = true;
+  head.addText(c.demo ? "Standort (Demo)" : "Standort").widthWeight = 40;
+  keys.forEach(k => { const cell = head.addText(colLabel(k, c)); cell.widthWeight = 15; cell.centerAligned(); });
+  table.addRow(head);
+
+  const order = [c.id, ...CONFIG.REGION, ...CONFIG.SWISS];
+  Object.keys(data.byId).forEach(id => { if (!order.includes(id)) order.push(id); });
+  [...new Set(order)].filter(id => data.byId[id]).forEach(id => {
+    const l = data.byId[id];
+    const row = new UITableRow();
+    row.height = 48;
+    const alt = l.location.kind === "point" ? `${Math.round(l.location.altitude_m)} m` : "Höhenband (P90)";
+    const cell = row.addText(name(l.location), alt);
+    cell.widthWeight = 40;
+    cell.titleFont = Font.semiboldSystemFont(15);
+    cell.subtitleColor = Color.gray();
+    keys.forEach(k => {
+      const e = l.days[k];
+      const v = row.addText(`${CAT[catKey(e)].dot} ${valueText(e)}`);
+      v.widthWeight = 15;
+      v.centerAligned();
+    });
+    table.addRow(row);
+  });
+
+  const info = new UITableRow();
+  info.height = 70;
+  const src = data.daily.sources || {};
+  const t = info.addText(status(c, true).text,
+    `ICON ${src.icon ? src.icon.reference_time.slice(0, 13) : "?"}Z · CAMS ${src.cams ? src.cams.reference_time.slice(0, 13) : "?"}Z · Tageswert = höchstes 30-min-Mittel`);
+  t.titleFont = Font.systemFont(12);
+  t.subtitleFont = Font.systemFont(10);
+  table.addRow(info);
+  await table.present();
+}
+
+// ---------- Start ----------
+
+let data;
+try {
+  data = await loadData();
+} catch (err) {
+  data = { error: `Keine Daten (${err.message || err}). DATA_BASE_URL prüfen.` };
+}
+
+if (config.runsInWidget) {
+  Script.setWidget(buildWidget(data, config.widgetFamily || "small"));
+} else {
+  await showTable(data);
+}
+Script.complete();
