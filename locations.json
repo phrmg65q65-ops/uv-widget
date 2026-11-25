@@ -1,0 +1,48 @@
+{
+  "name": "UV-Widget Riederalp & Schweiz",
+  "geometry_description": "Ortspunkte mit Referenzhöhe (ambient, horizontal, ohne Horizont) plus Walliser Höhenbänder als Bergkontext",
+  "entries": [
+    {
+      "id": "riederalp",
+      "kind": "point",
+      "label": "Riederalp",
+      "latitude": 46.3815,
+      "longitude": 8.0262,
+      "altitude_m": 1925,
+      "coordinate_source": "ungefähr Riederalp Mitte; bei Bedarf mit map.geo.admin.ch präzisieren"
+    },
+    {
+      "id": "moosfluh",
+      "kind": "point",
+      "label": "Moosfluh",
+      "latitude": 46.396046,
+      "longitude": 8.048356,
+      "altitude_m": 2333,
+      "coordinate_source": "Bergstation Moosfluhbahn"
+    },
+    {
+      "id": "walliser_alpen_2000",
+      "kind": "region_altitude",
+      "label": "Walliser Alpen",
+      "bbox": [7.0, 45.9, 8.4, 46.4],
+      "altitude_m": 2000,
+      "boundary_source": "Box aus dem icon-uv-Kartenbeispiel"
+    },
+    {
+      "id": "walliser_alpen_3000",
+      "kind": "region_altitude",
+      "label": "Walliser Alpen",
+      "bbox": [7.0, 45.9, 8.4, 46.4],
+      "altitude_m": 3000,
+      "boundary_source": "Box aus dem icon-uv-Kartenbeispiel"
+    },
+    {"id": "brig",    "kind": "point", "label": "Brig",   "latitude": 46.317009, "longitude": 7.994198, "altitude_m": 721},
+    {"id": "sion",    "kind": "point", "label": "Sion",   "latitude": 46.226589, "longitude": 7.353846, "altitude_m": 484},
+    {"id": "zuerich", "kind": "point", "label": "Zürich", "latitude": 47.383949, "longitude": 8.530146, "altitude_m": 405},
+    {"id": "bern",    "kind": "point", "label": "Bern",   "latitude": 46.948997, "longitude": 7.437128, "altitude_m": 541},
+    {"id": "basel",   "kind": "point", "label": "Basel",  "latitude": 47.557598, "longitude": 7.592385, "altitude_m": 245},
+    {"id": "genf",    "kind": "point", "label": "Genf",   "latitude": 46.205872, "longitude": 6.142105, "altitude_m": 376},
+    {"id": "lugano",  "kind": "point", "label": "Lugano", "latitude": 46.00806,  "longitude": 8.952294, "altitude_m": 277},
+    {"id": "davos",   "kind": "point", "label": "Davos",  "latitude": 46.792931, "longitude": 9.820781, "altitude_m": 1557}
+  ]
+}
